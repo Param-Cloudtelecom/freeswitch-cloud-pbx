@@ -1,0 +1,61 @@
+<!--
+  Multi-tenant dialplan template.
+
+  In production this is generated per-tenant (e.g. via mod_xml_curl pulling
+  from a provisioning DB) - one <context> per tenant domain, so tenant A's
+  dialplan can never match tenant B's extensions even if numbering overlaps.
+
+  This file shows the pattern for one tenant ("acme"); duplicate the
+  <context> block (with a different name + tenant_id) per customer.
+-->
+<include>
+  <context name="acme">
+
+    <!-- Internal extension-to-extension dialing -->
+    <extension name="internal_extensions">
+      <condition field="destination_number" expression="^(10[01][0-9])$">
+        <action application="set" data="tenant_id=acme"/>
+        <action application="export" data="dialed_extension=$1"/>
+        <action application="hash" data="insert/${domain_name}-call_return/${caller_id_number}/${uuid}"/>
+        <action application="set" data="ringback=${us-ring}"/>
+        <action application="set" data="hangup_after_bridge=true"/>
+        <action application="bridge" data="user/$1@${domain_name}"/>
+        <action application="answer"/>
+        <action application="sleep" data="1000"/>
+        <action application="voicemail" data="default ${domain_name} $1"/>
+      </condition>
+    </extension>
+
+    <!-- IVR entry point for the tenant's main DID -->
+    <extension name="main_ivr">
+      <condition field="destination_number" expression="^(18005551234)$">
+        <action application="set" data="tenant_id=acme"/>
+        <action application="answer"/>
+        <action application="sleep" data="500"/>
+        <action application="ivr" data="acme_main_menu"/>
+      </condition>
+    </extension>
+
+    <!-- Outbound calls: tag with tenant_id so the SBC/dispatcher layer
+         (see kamailio-sbc-router) can select the correct trunk group,
+         and so the CDR pipeline can attribute billing correctly. -->
+    <extension name="outbound_calls">
+      <condition field="destination_number" expression="^9(\d{10})$">
+        <action application="set" data="tenant_id=acme"/>
+        <action application="set" data="effective_caller_id_number=18005551234"/>
+        <action application="export" data="sip_h_X-Tenant-Id=acme"/>
+        <action application="bridge" data="sofia/gateway/acme_outbound_trunk/$1"/>
+      </condition>
+    </extension>
+
+    <!-- Fired on every call hangup: ship the CDR via HTTP to our API layer
+         (see api/cdr_webhook.py) in addition to mod_cdr_pg's direct DB write -
+         the webhook lets non-DB consumers (billing, analytics) react in real time. -->
+    <extension name="cdr_webhook_hangup_hook">
+      <condition field="${current_application}" expression="^$">
+        <action application="curl" data="http://127.0.0.1:8088/cdr async=true"/>
+      </condition>
+    </extension>
+
+  </context>
+</include>
